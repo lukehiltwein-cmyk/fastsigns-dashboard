@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -568,15 +569,13 @@
 
   <!-- Config Banner -->
   <div class="config-banner" id="config-banner">
-    <span class="icon">🔌</span>
+    <span class="icon">🔄</span>
     <div>
-      <strong>Connect to Corebridge</strong> — Enter your API credentials to load live job data, or
-      <span style="text-decoration:underline;cursor:pointer;color:var(--fs-orange)" onclick="toggleUpload()">upload a CSV export</span> to get started.
+      <strong>Loading live data from Corebridge...</strong> — or
+      <span style="text-decoration:underline;cursor:pointer;color:var(--fs-orange)" onclick="toggleUpload()">upload a CSV export</span> as a backup.
     </div>
     <div class="config-inputs">
-      <input class="config-input" id="api-key-input" type="password" placeholder="API Key" value="3e6ed1d8-a81a-4fbb-9fbe-f33dff30ad6d" />
-      <input class="config-input" id="api-url-input" type="text" placeholder="Base URL" value="fs2498.v2api.corebridge.net/api/public" />
-      <button class="config-btn" onclick="loadData()">Connect Live</button>
+      <button class="config-btn" onclick="loadData()">Load Live Data</button>
     </div>
   </div>
 
@@ -716,12 +715,10 @@
 
 <script>
 // ── CONFIG ──
-const API_KEY = () => document.getElementById('api-key-input').value.trim();
-const API_URL = () => {
-  let u = document.getElementById('api-url-input').value.trim();
-  if (!u.startsWith('http')) u = 'https://' + u;
-  return u;
-};
+// Proxy endpoint — Vercel serverless function handles Corebridge auth
+const PROXY_URL = '/api/corebridge';
+const AUTO_REFRESH_MS = 5 * 60 * 1000; // refresh every 5 minutes
+let autoRefreshTimer = null;
 
 // ── STATE ──
 let allJobs = [];
@@ -974,31 +971,34 @@ function setSearch(q) {
 async function loadData() {
   const btn = document.getElementById('refresh-btn');
   btn.classList.add('spinning');
-  showLoading('Connecting to Corebridge API...');
+  showLoading('Connecting to Corebridge...');
+
+  // Clear any existing auto-refresh timer
+  if (autoRefreshTimer) clearTimeout(autoRefreshTimer);
 
   try {
-    const url = API_URL() + '/ExOrder';
-    const res = await fetch(url, {
-      headers: {
-        'ApiTag': API_KEY(),
-        'Content-Type': 'application/json'
-      },
-      mode: 'cors'
-    });
+    // Call our Vercel proxy — it handles the Corebridge auth server-side
+    const res = await fetch(PROXY_URL + '?endpoint=ExOrder');
 
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!res.ok) throw new Error('Proxy returned HTTP ' + res.status);
     const data = await res.json();
+
+    if (data.error) throw new Error(data.error);
+
     allJobs = parseAPIJobs(data);
-    updateLastUpdated();
+    updateLastUpdated('live');
     document.getElementById('config-banner').style.display = 'none';
     renderJobs();
+
+    // Schedule next auto-refresh
+    autoRefreshTimer = setTimeout(loadData, AUTO_REFRESH_MS);
+    console.log('Live data loaded:', allJobs.length, 'jobs. Next refresh in 5 min.');
+
   } catch (err) {
-    console.warn('API failed, loading sample data:', err.message);
-    // Fall back to sample data
+    console.warn('Proxy failed, using sample data:', err.message);
     allJobs = SAMPLE_JOBS;
-    updateLastUpdated('sample data');
+    updateLastUpdated('sample data — proxy unavailable');
     renderJobs();
-    showToast('Live API unavailable — showing CSV data. ' + err.message);
   } finally {
     hideLoading();
     btn.classList.remove('spinning');
@@ -1115,11 +1115,14 @@ function updateLastUpdated(src) {
 }
 function showToast(msg) { console.warn(msg); }
 
-// ── INIT — load sample data immediately ──
+// ── INIT — try live data first, fall back to sample ──
 window.addEventListener('DOMContentLoaded', () => {
+  // Show sample data immediately so screen isn't blank
   allJobs = SAMPLE_JOBS;
-  updateLastUpdated('sample data');
+  updateLastUpdated('loading...');
   renderJobs();
+  // Then try to load live data from Corebridge via proxy
+  loadData();
 });
 </script>
 </body>
