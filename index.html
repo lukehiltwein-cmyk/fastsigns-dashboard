@@ -284,16 +284,17 @@ let searchQ = '', repFilter = 'all';
 let currentItem = null;
 
 // ── QUEUE DEFINITIONS (matching exact Corebridge status values) ──
+// Queue definitions matching exact Corebridge ProductStatusCBName values
+// Full status list confirmed by Corebridge support
 const QUEUES = [
   {
     id: 'sales-review',
     name: 'Sales Review',
     color: 'var(--pink)',
     match: j => {
-      const s = j.status, ss = j.substatus;
-      return s.includes('SALES REVIEW') || s.includes('Sales Review') ||
-             ss.toLowerCase().includes('sales review') ||
-             ss.toLowerCase().includes('order review');
+      const m = j.matchStr;
+      return m.includes('sales review') || m.includes('order review') ||
+             m.includes('design needed');
     }
   },
   {
@@ -301,21 +302,12 @@ const QUEUES = [
     name: 'Customer Action',
     color: 'var(--yellow)',
     match: j => {
-      const s = j.status;
-      return s.includes('AWAITING CUSTOMER') || s.includes('Awaiting Customer') ||
-             s.toLowerCase().includes('customer action');
-    }
-  },
-  {
-    id: 'wip',
-    name: 'WIP — In Production',
-    color: 'var(--blue)',
-    match: j => {
-      const s = j.status, ss = j.substatus;
-      return (s.includes('WIP') || s.includes('In Production')) &&
-             !ss.toLowerCase().includes('vend') &&
-             !ss.toLowerCase().includes('built') &&
-             !ss.toLowerCase().includes('design');
+      const m = j.matchStr;
+      return m.includes('awaiting customer action') ||
+             m.includes('awaiting customer approval') ||
+             m.includes('awaiting proof approval') ||
+             m.includes('proof approved') ||
+             m.includes('revision');
     }
   },
   {
@@ -323,37 +315,50 @@ const QUEUES = [
     name: 'In Design',
     color: 'var(--teal)',
     match: j => {
-      const s = j.status, ss = j.substatus;
-      return ss.toLowerCase().includes('in design') || ss.toLowerCase().includes('design time') ||
-             s.toLowerCase().includes('in design') || s.includes('Estimates In Design');
+      const m = j.matchStr;
+      return (m.includes('in design') && !m.includes('revision')) ||
+             m.includes('design review') || m.includes('quality control');
+    }
+  },
+  {
+    id: 'in-design-revision',
+    name: 'Design Revision',
+    color: 'var(--orange)',
+    match: j => {
+      const m = j.matchStr;
+      return m.includes('in design revision') || m.includes('design revision');
     }
   },
   {
     id: 'vended',
     name: 'Vended / Outsourced',
     color: 'var(--purple)',
-    match: j => j.substatus.toLowerCase().includes('vend') || j.status.toLowerCase().includes('vend')
+    match: j => {
+      const m = j.matchStr;
+      return m.includes('vended product') || m.includes('vend');
+    }
+  },
+  {
+    id: 'wip',
+    name: 'In Production',
+    color: 'var(--blue)',
+    match: j => {
+      const m = j.matchStr;
+      return m.includes('in production') ||
+             (m.includes('wip') && !m.includes('vend') && !m.includes('design') &&
+              !m.includes('review') && !m.includes('customer') && !m.includes('proof') &&
+              !m.includes('revision') && !m.includes('quality') && !m.includes('built'));
+    }
   },
   {
     id: 'built',
     name: 'Built — Ready',
     color: 'var(--green)',
     match: j => {
-      const s = j.status, ss = j.substatus;
-      return s.includes('BUILT') || s.includes('Built') ||
-             ss.toLowerCase().includes('awaiting installation') ||
-             ss.toLowerCase().includes('awaiting pickup') ||
-             ss.toLowerCase().includes('awaiting customer pickup');
-    }
-  },
-  {
-    id: 'past-due',
-    name: 'Past Due',
-    color: 'var(--red)',
-    match: j => {
-      if (!j.dueDate) return false;
-      const today = new Date(); today.setHours(0,0,0,0);
-      return j.dueDate < today && !j.status.includes('BUILT') && !j.status.includes('Built');
+      const m = j.matchStr;
+      return m.includes('built') || m.includes('awaiting installation') ||
+             m.includes('awaiting pickup') || m.includes('paid in full') ||
+             m.includes('closed');
     }
   }
 ];
@@ -362,10 +367,10 @@ const QUEUES = [
 const STATS = [
   {label:'Sales Review', key:'sales-review', color:'var(--pink)'},
   {label:'Customer Action', key:'customer-action', color:'var(--yellow)'},
+  {label:'In Design', key:'in-design', color:'var(--teal)'},
   {label:'In Production', key:'wip', color:'var(--blue)'},
   {label:'Vended', key:'vended', color:'var(--purple)'},
   {label:'Built / Ready', key:'built', color:'var(--green)'},
-  {label:'Past Due', key:'past-due', color:'var(--red)'},
 ];
 
 // ── DATE HELPERS ──
@@ -411,28 +416,59 @@ function initials(name) {
 
 // ── MAP API DATA ──
 function mapOrder(item) {
-  const statusRaw = item.Status || '';
-  const substatusRaw = item.ProductSubstatus || item.Substatus || item.ProductSubstatusText || '';
-  // Corebridge format: "WIP : In Design" — split on " : "
+  // Handle both ExOrder and ExOrderProduct field names
+  // ExOrderProduct uses ProductStatusCBName like "WIP : In Design"
+  const statusCBName = item.ProductStatusCBName || '';
+  const statusRaw = statusCBName || item.Status || '';
+  const substatusRaw = item.ProductSubStatus || item.ProductSubstatus || item.Substatus || '';
+
+  const statusFull = statusRaw;
   const statusParts = statusRaw.split(' : ');
   const mainStatus = statusParts[0]?.trim() || statusRaw;
-  const subStatus = statusParts[1]?.trim() || substatusRaw;
+  const subStatus = statusParts.length > 1 ? statusParts.slice(1).join(' : ').trim() : (substatusRaw || '');
+
+  // matchStr covers everything for queue routing
+  const matchStr = (statusRaw + ' ' + substatusRaw).toLowerCase();
+
+  // Due date — ExOrderProduct uses ProductProductionDue
+  const dueDate = parseDate(item.ProductProductionDue) ||
+                  parseDate(item.OrderDueDate) ||
+                  parseDate(item.EstimateProjectedOrderDueDate);
+
+  // Amount — ExOrderProduct uses ProductSubTotal
+  const amount = parseFloat(
+    item.ProductSubTotal || item.ProductTotal ||
+    item.OrderSubTotal || item.OrderTotal ||
+    item.SubtotalAmount || 0
+  );
+
+  // Rep — ExOrderProduct may not have rep, use Designer name as fallback
+  const designerName = item.Designer
+    ? `${item.Designer.FirstName||''} ${item.Designer.LastName||''}`.trim()
+    : '';
+  const rep = item.OrderSalesPerson || item.SalespersonName || designerName || '—';
+
+  // Order ID — ExOrderProduct has OrderId linking back to the order
+  const orderId = item.ExOrderProductId
+    ? `${item.OrderId}-P${item.ExOrderProductId}`
+    : String(item.OrderId || item.Id || '');
 
   return {
-    id: String(item.OrderId || item.Id || ''),
-    orderId: String(item.OrderId || item.Id || ''),
-    customer: item.CompanyName || item.CustomerName || '—',
+    id: String(item.ExOrderProductId || item.OrderId || item.Id || ''),
+    orderId: orderId,
+    customer: item.CompanyName || item.CustomerName || item.OrderContact || '—',
     contact: item.OrderContact || '',
     email: item.OrderContactEmail || '',
     phone: item.CompanyPhone || '',
-    description: item.OrderDescription || item.OrderText || '—',
+    description: item.ProductDescription || item.OrderDescription || item.OrderText || '—',
     status: mainStatus,
-    substatus: subStatus || substatusRaw,
-    statusFull: statusRaw,
-    rep: item.OrderSalesPerson || item.SalespersonName || '—',
-    dueDate: parseDate(item.OrderDueDate) || parseDate(item.EstimateProjectedOrderDueDate),
-    amount: parseFloat(item.OrderSubTotal || item.OrderTotal || item.SubtotalAmount || 0),
-    isVended: (subStatus||substatusRaw||'').toLowerCase().includes('vend') || statusRaw.toLowerCase().includes('vend'),
+    substatus: subStatus,
+    statusFull: statusFull,
+    matchStr: matchStr,
+    rep: rep,
+    dueDate: dueDate,
+    amount: amount,
+    isVended: item.IsVended === true || matchStr.includes('vend'),
   };
 }
 
@@ -484,8 +520,24 @@ async function loadAll() {
   showLoader('Connecting to Corebridge...');
 
   try {
-    setLoader('Loading orders...');
-    const rawOrders = await apiFetch('ExOrder');
+    setLoader('Loading active jobs...');
+    // Pull active WIP jobs using ExOrderProduct sub-endpoints
+    // These require BASIC auth prefix (confirmed by Corebridge support)
+    let rawOrders = [];
+    const activeStatuses = ['WIP', 'BUILT', 'ESTIMATE'];
+    for (const status of activeStatuses) {
+      try {
+        const jobs = await apiFetch(`ExOrderProduct%2FGetExOrderProductByOrderStatus&orderStatus=${status}`);
+        rawOrders = rawOrders.concat(jobs);
+      } catch(e) {
+        console.warn(`Status ${status}:`, e.message);
+      }
+    }
+    // Also get base ExOrder for any we missed
+    try {
+      const baseOrders = await apiFetch('ExOrder');
+      rawOrders = rawOrders.concat(baseOrders);
+    } catch(e) { console.warn('Base ExOrder:', e.message); }
 
     setLoader('Loading estimates...');
     let rawEstimates = [];
