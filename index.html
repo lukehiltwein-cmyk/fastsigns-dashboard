@@ -506,11 +506,14 @@ function mapCustomer(item) {
 }
 
 // ── FETCH ──
-async function apiFetch(endpoint) {
-  const r = await fetch(`${PROXY}?endpoint=${endpoint}`);
-  if (!r.ok) throw new Error(`${endpoint}: HTTP ${r.status}`);
+async function apiFetch(endpoint, action, extraParams) {
+  let url = `${PROXY}?endpoint=${endpoint}`;
+  if (action) url += `&action=${action}`;
+  if (extraParams) url += `&${extraParams}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${endpoint}${action?'/'+action:''}: HTTP ${r.status}`);
   const d = await r.json();
-  if (d.error) throw new Error(d.error);
+  if (d && d.error) throw new Error(d.error);
   return Array.isArray(d) ? d : [];
 }
 
@@ -521,23 +524,27 @@ async function loadAll() {
 
   try {
     setLoader('Loading active jobs...');
-    // Pull active WIP jobs using ExOrderProduct sub-endpoints
-    // These require BASIC auth prefix (confirmed by Corebridge support)
+    // Pull active jobs by order status using ExOrderProduct sub-endpoint
+    // Uses ?endpoint=ExOrderProduct&action=GetExOrderProductByOrderStatus&orderStatus=X
     let rawOrders = [];
     const activeStatuses = ['WIP', 'BUILT', 'ESTIMATE'];
     for (const status of activeStatuses) {
       try {
-        const jobs = await apiFetch(`ExOrderProduct%2FGetExOrderProductByOrderStatus&orderStatus=${status}`);
+        const jobs = await apiFetch('ExOrderProduct', 'GetExOrderProductByOrderStatus', `orderStatus=${status}`);
+        console.log(`${status}: ${jobs.length} jobs`);
         rawOrders = rawOrders.concat(jobs);
       } catch(e) {
         console.warn(`Status ${status}:`, e.message);
       }
     }
-    // Also get base ExOrder for any we missed
-    try {
-      const baseOrders = await apiFetch('ExOrder');
-      rawOrders = rawOrders.concat(baseOrders);
-    } catch(e) { console.warn('Base ExOrder:', e.message); }
+    // Fall back to base ExOrder if sub-endpoints fail
+    if (rawOrders.length === 0) {
+      try {
+        const baseOrders = await apiFetch('ExOrder');
+        rawOrders = rawOrders.concat(baseOrders);
+        console.log('Fallback ExOrder:', baseOrders.length);
+      } catch(e) { console.warn('Base ExOrder:', e.message); }
+    }
 
     setLoader('Loading estimates...');
     let rawEstimates = [];
