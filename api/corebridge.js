@@ -8,7 +8,9 @@ module.exports = async function handler(req, res) {
   const API_KEY = '3e6ed1d8-a81a-4fbb-9fbe-f33dff30ad6d';
   const BASE_URL = 'https://fs2498.v2api.corebridge.net/api/public';
 
-  let endpoint = decodeURIComponent(req.query.endpoint || 'ExOrder');
+  // Support both ?endpoint=ExOrder and ?endpoint=ExOrderProduct&action=GetExOrderProductByOrderStatus
+  const endpoint = req.query.endpoint || 'ExOrder';
+  const action = req.query.action || '';
 
   const allowedBases = [
     'ExOrder', 'ExOrderDetail', 'ExOrderProduct', 'ExOrderProductPart',
@@ -16,23 +18,26 @@ module.exports = async function handler(req, res) {
     'ExVendorPurchaseOrder', 'ExContact'
   ];
 
-  const base = endpoint.split('/')[0];
-  if (!base || !allowedBases.includes(base)) {
+  if (!allowedBases.includes(endpoint)) {
     return res.status(400).json({ error: 'Endpoint not allowed: ' + endpoint });
   }
 
   try {
+    // Build extra query params — exclude our own routing params
     const params = Object.assign({}, req.query);
     delete params.endpoint;
+    delete params.action;
     const qs = new URLSearchParams(params).toString();
-    const url = `${BASE_URL}/${endpoint}${qs ? '?' + qs : ''}`;
+
+    // Build full URL — append action as sub-path if provided
+    const path = action ? `${endpoint}/${action}` : endpoint;
+    const url = `${BASE_URL}/${path}${qs ? '?' + qs : ''}`;
 
     console.log('Proxying to:', url);
 
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        // Corebridge requires "BASIC " prefix on the API key
         'Authorization': `BASIC ${API_KEY}`,
         'ApiTag': API_KEY,
         'Content-Type': 'application/json',
@@ -41,7 +46,7 @@ module.exports = async function handler(req, res) {
     });
 
     const text = await response.text();
-    console.log('Status:', response.status, '| Preview:', text.substring(0, 150));
+    console.log('Status:', response.status, '| Preview:', text.substring(0, 200));
 
     if (!response.ok) {
       return res.status(response.status).json({
